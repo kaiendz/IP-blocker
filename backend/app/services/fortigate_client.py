@@ -107,16 +107,19 @@ class FortiGateClient:
         Pages through `rows`/`start` until a short page signals the end or
         `max_pages` is hit as a safety cap, since this endpoint silently caps
         each response to a small page unless paginated explicitly.
-        """
-        filters = []
-        if since is not None:
-            filters.append(f"timestamp=>{int(since.astimezone(timezone.utc).timestamp())}")
 
+        `since` isn't sent as a server-side filter — a 'timestamp=>' filter
+        clause caused a confirmed HTTP 500 on real hardware, and 'timestamp'
+        isn't a documented filterable field for this endpoint. Time-bounding
+        instead happens client-side in `fetch_auth_failures` after entries are
+        parsed, so `rows`/`max_pages` need to comfortably cover the expected
+        volume of new entries between polls.
+        """
         stores = [log_store] if log_store else ([self._log_store] if self._log_store else ["memory", "disk"])
         last_exc: Optional[httpx.HTTPStatusError] = None
         for store in stores:
             try:
-                results = self._fetch_all_pages(store, log_subtype, filters, rows, page_size, max_pages)
+                results = self._fetch_all_pages(store, log_subtype, rows, page_size, max_pages)
                 self._log_store = store
                 return results
             except httpx.HTTPStatusError as exc:
@@ -136,15 +139,13 @@ class FortiGateClient:
         ) from last_exc
 
     def _fetch_all_pages(
-        self, store: str, log_subtype: str, filters: list[str], rows: int, page_size: int, max_pages: int
+        self, store: str, log_subtype: str, rows: int, page_size: int, max_pages: int
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         page_size = min(page_size, rows) if rows else page_size
         with self._client() as client:
             for page in range(max_pages):
                 params: dict[str, Any] = {"vdom": self.vdom, "rows": page_size, "start": page * page_size}
-                if filters:
-                    params["filter"] = filters
                 resp = client.get(f"/api/v2/log/{store}/event/{log_subtype}", params=params)
                 resp.raise_for_status()
                 page_results = resp.json().get("results", []) or []
@@ -168,8 +169,11 @@ class FortiGateClient:
         normalized = []
         for raw in raw_events:
             event = normalize_event(raw, vpn_type)
-            if event is not None:
-                normalized.append(event)
+            if event is None:
+                continue
+            if since is not None and event.event_time <= since:
+                continue  # already seen on a previous poll — not filtered server-side
+            normalized.append(event)
         return normalized
 
 

@@ -64,7 +64,15 @@ def poll_device(db: Session, device: FortiGateDevice) -> tuple[bool, str, int]:
                 cursor = _get_cursor(db, device.id, vpn_type)
                 since = cursor.last_event_time or (datetime.now(timezone.utc) - _LOOKBACK_ON_FIRST_POLL)
                 raw_events = client.fetch_events(device.forticloud_serial, subtype, since)
-                events = [e for e in (normalize_event(r, vpn_type) for r in raw_events) if e is not None]
+                # The "since" param sent to FortiCloud is best-effort and unverified
+                # for this subscription (see forticloud_client.py) — re-filter
+                # client-side so an unsupported/ignored server-side filter can't
+                # cause already-ingested events to be re-stored every poll.
+                events = [
+                    e
+                    for e in (normalize_event(r, vpn_type) for r in raw_events)
+                    if e is not None and e.event_time > since
+                ]
                 total_ingested += _store_events(db, device.id, events)
                 if events:
                     cursor.last_event_time = max(e.event_time for e in events)
