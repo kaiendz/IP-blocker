@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.security import decrypt_secret
 from app.models.auth_event import AuthEvent
 from app.models.device import ForticloudCredential, FortiGateDevice, LogSource, PollCursor
-from app.services.fortigate_client import FortiGateClient, normalize_event
+from app.services.fortigate_client import VPN_TYPE_TO_SUBTYPE, FortiGateClient, normalize_event
 from app.services.forticloud_client import ForticloudClient
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,7 @@ def poll_device(db: Session, device: FortiGateDevice) -> tuple[bool, str, int]:
                 cred.api_gateway,
             )
             for vpn_type in _VPN_TYPES:
-                subtype = {"sslvpn": "vpn", "ike": "vpn", "admin": "user"}[vpn_type]
+                subtype = VPN_TYPE_TO_SUBTYPE[vpn_type]
                 cursor = _get_cursor(db, device.id, vpn_type)
                 since = cursor.last_event_time or (datetime.now(timezone.utc) - _LOOKBACK_ON_FIRST_POLL)
                 raw_events = client.fetch_events(device.forticloud_serial, subtype, since)

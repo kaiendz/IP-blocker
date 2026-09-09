@@ -5,11 +5,12 @@ VPN / admin login events. This client intentionally has no method that writes
 configuration to the device — the app has no firewall-write capability by design.
 
 IMPORTANT — validate against your firmware: FortiOS's monitor log API field
-names and exact endpoint shape have shifted across 6.4 / 7.0 / 7.2 / 7.4. This
-client targets the commonly documented `/api/v2/monitor/log/event/<subtype>`
-shape and normalizes several historically-seen field name variants, but you
-should use the "Test Connection" action after adding a device and, if event
-counts look wrong, inspect `raw` on a few `AuthEvent` rows and adjust
+names have shifted across 6.4 / 7.0 / 7.2 / 7.4. This client targets the
+FortiOS 7.2.x/7.4.x "event" log endpoint `/api/v2/monitor/log/disk/event`,
+where the log subtype (`vpn`, `system`, `user`, ...) is a query parameter —
+not a URL path segment — and normalizes several historically-seen field name
+variants. Use the "Test Connection" action after adding a device and, if
+event counts look wrong, inspect `raw` on a few `AuthEvent` rows and adjust
 `normalize_event` / the filters below for your exact version.
 """
 from __future__ import annotations
@@ -22,6 +23,12 @@ from typing import Any, Optional
 import httpx
 
 logger = logging.getLogger(__name__)
+
+# Subtype mapping per the FortiOS 7.2.x/7.4.x Log Reference: SSL VPN and
+# IPsec/IKE events are both logged under the 'vpn' event subtype; admin
+# GUI/SSH login attempts are logged under 'system' (not 'user' — that
+# subtype covers end-user firewall authentication, e.g. FSSO/RADIUS).
+VPN_TYPE_TO_SUBTYPE = {"sslvpn": "vpn", "ike": "vpn", "admin": "system"}
 
 
 @dataclass
@@ -72,15 +79,23 @@ class FortiGateClient:
         except Exception as exc:  # noqa: BLE001 — surface any client error to the caller
             return False, f"Error: {exc}"
 
-    def fetch_events(self, log_subtype: str, since: Optional[datetime], rows: int = 500) -> list[dict[str, Any]]:
-        """Fetch raw log entries for a monitor log subtype (e.g. 'vpn', 'user', 'system')."""
-        params: dict[str, Any] = {"vdom": self.vdom, "rows": rows}
+    def fetch_events(
+        self, log_subtype: str, since: Optional[datetime], rows: int = 500, log_location: str = "disk"
+    ) -> list[dict[str, Any]]:
+        """Fetch raw log entries for an event-log subtype (e.g. 'vpn', 'user', 'system').
+
+        On FortiOS 7.2.x/7.4.x, `subtype` is a query parameter on the
+        `/api/v2/monitor/log/{location}/event` endpoint, not a path segment.
+        `log_location` is 'disk' by default; FortiGate VMs without local disk
+        logging enabled may need 'memory' instead.
+        """
+        params: dict[str, Any] = {"vdom": self.vdom, "rows": rows, "subtype": log_subtype}
         if since is not None:
             # FortiOS accepts a unix-epoch "since" filter on most monitor/log endpoints.
             params["since"] = int(since.astimezone(timezone.utc).timestamp())
         try:
             with self._client() as client:
-                resp = client.get(f"/api/v2/monitor/log/event/{log_subtype}", params=params)
+                resp = client.get(f"/api/v2/monitor/log/{log_location}/event", params=params)
             resp.raise_for_status()
             payload = resp.json()
             return payload.get("results", []) or []
@@ -93,7 +108,7 @@ class FortiGateClient:
 
     def fetch_auth_failures(self, vpn_type: str, since: Optional[datetime], rows: int = 500) -> list[NormalizedEvent]:
         """vpn_type is one of 'sslvpn', 'ike', 'admin'."""
-        subtype = {"sslvpn": "vpn", "ike": "vpn", "admin": "user"}.get(vpn_type)
+        subtype = VPN_TYPE_TO_SUBTYPE.get(vpn_type)
         if subtype is None:
             raise ValueError(f"Unknown vpn_type: {vpn_type}")
         raw_events = self.fetch_events(subtype, since, rows)
@@ -113,6 +128,7 @@ _FAIL_ACTIONS = {
     "phase1-error",
     "phase2-error",
 }
+_FAIL_STATUSES = {"failed", "failure", "deny", "denied"}
 _FAIL_KEYWORDS = ("fail", "denied", "invalid", "error", "reject")
 
 
@@ -127,18 +143,27 @@ def normalize_event(raw: dict[str, Any], vpn_type: str) -> Optional[NormalizedEv
     """Best-effort normalization across FortiOS field-naming variants.
 
     FortiOS log fields commonly seen: srcip/src/remip, user/admin, action,
-    reason/msg/logdesc, itime/eventtime/time+date.
+    reason/msg/logdesc, itime/eventtime/time+date. For 'vpn' subtype events
+    the result is usually encoded directly in `action` (e.g. 'ssl-login-fail');
+    for 'system' subtype events (admin logins) `action` is generic ('login')
+    and the result is instead in a separate `status` field ('success'/'failed'),
+    so both must be checked independently rather than picking whichever is set.
     """
     src_ip = _first(raw, "srcip", "src", "remip", "raddr")
     if not src_ip:
         return None
 
     username = _first(raw, "user", "admin", "xauthuser")
-    action_raw = _first(raw, "action", "status").lower()
+    action_raw = _first(raw, "action").lower()
+    status_raw = _first(raw, "status").lower()
     logdesc = _first(raw, "logdesc", "msg", "reason").lower()
 
-    is_failure = action_raw in _FAIL_ACTIONS or any(k in action_raw for k in _FAIL_KEYWORDS) or any(
-        k in logdesc for k in _FAIL_KEYWORDS
+    is_failure = (
+        action_raw in _FAIL_ACTIONS
+        or status_raw in _FAIL_STATUSES
+        or any(k in action_raw for k in _FAIL_KEYWORDS)
+        or any(k in status_raw for k in _FAIL_KEYWORDS)
+        or any(k in logdesc for k in _FAIL_KEYWORDS)
     )
     is_locked = "locked" in logdesc or "lockout" in logdesc
     action = "locked" if is_locked else ("failed" if is_failure else "success")
