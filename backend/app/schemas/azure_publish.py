@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 class AzurePublishConfigUpdate(BaseModel):
     connection_string: Optional[str] = None  # plaintext in-transit; encrypted before storage
+    sas_url: Optional[str] = None  # alternative to connection_string; see model docstring
     container_name: Optional[str] = None
     blob_prefix: Optional[str] = None
     chunk_size: Optional[int] = None
@@ -24,6 +25,7 @@ class AzurePublishConfigOut(BaseModel):
     generate_sas: bool
     enabled: bool
     has_connection_string: bool
+    has_sas_url: bool
 
 
 class PublishedFeedPartOut(BaseModel):

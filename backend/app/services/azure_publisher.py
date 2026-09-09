@@ -13,6 +13,7 @@ import hashlib
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import parse_qs, urlsplit
 
 from sqlalchemy.orm import Session
 
@@ -46,6 +47,17 @@ def _parse_connection_string(conn_str: str) -> dict[str, str]:
     return parts
 
 
+def _parse_sas_expiry(sas_query: str) -> Optional[datetime]:
+    """Extract the 'se' (signed expiry) param from a SAS query string, if present."""
+    try:
+        se = parse_qs(sas_query).get("se", [None])[0]
+        if not se:
+            return None
+        return datetime.fromisoformat(se.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+
+
 def get_active_blacklist_ips(db: Session) -> list[str]:
     allowlist = [a.ip_or_cidr for a in db.query(AllowlistEntry).all()]
     rows = (
@@ -66,32 +78,54 @@ def publish(db: Session) -> tuple[bool, str, list[PublishedFeedPart]]:
     config = db.query(AzurePublishConfig).first()
     if config is None or not config.enabled:
         return False, "Azure publishing is not configured/enabled", []
-    if not config.connection_string_encrypted:
-        return False, "No Azure Storage connection string configured", []
+    if not config.sas_url_encrypted and not config.connection_string_encrypted:
+        return False, "No Azure Storage connection string or SAS URL configured", []
 
     try:
         from azure.core.exceptions import ResourceExistsError
-        from azure.storage.blob import BlobServiceClient, ContentSettings, generate_blob_sas, BlobSasPermissions
+        from azure.storage.blob import (
+            BlobServiceClient,
+            ContainerClient,
+            ContentSettings,
+            generate_blob_sas,
+            BlobSasPermissions,
+        )
     except ImportError:
         return False, "azure-storage-blob package is not installed", []
 
-    conn_str = decrypt_secret(config.connection_string_encrypted)
+    account_name: Optional[str] = None
+    account_key: Optional[str] = None
+    sas_query: Optional[str] = None
+
     try:
-        service_client = BlobServiceClient.from_connection_string(conn_str)
-        container_client = service_client.get_container_client(config.container_name)
-        try:
-            container_client.create_container()
-        except ResourceExistsError:
-            pass
+        if config.sas_url_encrypted:
+            # SAS-URL auth: no account key available, so per-blob SAS tokens
+            # can't be generated. A container-scoped SAS already grants blob
+            # access with the same query string appended to the blob's path,
+            # so that's reused directly instead. The token's own "se" (expiry)
+            # param — not sas_expiry_days/generate_sas — determines how long
+            # it's valid; those settings only apply to connection-string auth.
+            # A container SAS also can't create containers, so unlike the
+            # connection-string path below, the container must already exist.
+            sas_url = decrypt_secret(config.sas_url_encrypted)
+            container_client = ContainerClient.from_container_url(sas_url)
+            sas_query = urlsplit(sas_url).query
+        else:
+            conn_str = decrypt_secret(config.connection_string_encrypted)
+            service_client = BlobServiceClient.from_connection_string(conn_str)
+            container_client = service_client.get_container_client(config.container_name)
+            try:
+                container_client.create_container()
+            except ResourceExistsError:
+                pass
+            cs_parts = _parse_connection_string(conn_str)
+            account_name = cs_parts.get("AccountName")
+            account_key = cs_parts.get("AccountKey")
 
         ips = get_active_blacklist_ips(db)
         chunks = build_chunks(ips, config.chunk_size)
         if not chunks:
             chunks = [[]]  # publish one empty part so FortiGate's feed doesn't 404
-
-        cs_parts = _parse_connection_string(conn_str)
-        account_name = cs_parts.get("AccountName")
-        account_key = cs_parts.get("AccountKey")
 
         existing_parts = {p.part_index: p for p in db.query(PublishedFeedPart).all()}
         result_parts: list[PublishedFeedPart] = []
@@ -117,7 +151,10 @@ def publish(db: Session) -> tuple[bool, str, list[PublishedFeedPart]]:
                 part.content_hash = new_hash
 
             blob_url = blob_client.url
-            if config.generate_sas and account_name and account_key:
+            if sas_query:
+                blob_url = f"{blob_client.url}?{sas_query}"
+                part.sas_expires_at = _parse_sas_expiry(sas_query) or sas_expiry
+            elif config.generate_sas and account_name and account_key:
                 sas_token = generate_blob_sas(
                     account_name=account_name,
                     container_name=config.container_name,

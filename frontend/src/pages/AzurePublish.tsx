@@ -29,6 +29,7 @@ export function AzurePublishPage() {
 
   const [form, setForm] = useState({
     connection_string: "",
+    sas_url: "",
     container_name: "fortigate-blacklist",
     blob_prefix: "blacklist/part-",
     chunk_size: 2000,
@@ -57,12 +58,13 @@ export function AzurePublishPage() {
     mutationFn: () => {
       const payload: Record<string, unknown> = { ...form };
       if (!payload.connection_string) delete payload.connection_string;
+      if (!payload.sas_url) delete payload.sas_url;
       return api.put("/azure-publish/config", payload);
     },
     onSuccess: () => {
       toast.push("Azure publish settings saved");
       qc.invalidateQueries({ queryKey: ["azure-config"] });
-      setForm((f) => ({ ...f, connection_string: "" }));
+      setForm((f) => ({ ...f, connection_string: "", sas_url: "" }));
     },
     onError: (e) => toast.push(e instanceof ApiError ? e.message : "Failed to save", "error"),
   });
@@ -97,7 +99,16 @@ export function AzurePublishPage() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
         <Card>
-          <CardHeader title="Storage settings" subtitle={config?.has_connection_string ? "Connection string is set" : "No connection string set yet"} />
+          <CardHeader
+            title="Storage settings"
+            subtitle={
+              config?.has_sas_url
+                ? "Using a SAS URL (preferred over connection string, if both set)"
+                : config?.has_connection_string
+                  ? "Using a connection string"
+                  : "No connection string or SAS URL set yet"
+            }
+          />
           <CardBody>
             <form
               className="space-y-3"
@@ -106,6 +117,22 @@ export function AzurePublishPage() {
                 saveMutation.mutate();
               }}
             >
+              <div>
+                <Label htmlFor="sas-url">Container SAS URL {config?.has_sas_url && "(leave blank to keep current)"}</Label>
+                <Input
+                  id="sas-url"
+                  type="password"
+                  disabled={!hasRole("admin")}
+                  value={form.sas_url}
+                  onChange={(e) => setForm({ ...form, sas_url: e.target.value })}
+                  placeholder="https://<account>.blob.core.windows.net/<container>?sv=...&sp=racwl&sig=..."
+                />
+                <p className="mt-1 text-xs text-slate-500">
+                  Preferred: a container-level SAS URL with read/write/create/list permissions. Never exposes the
+                  account key, and the container must already exist. Takes priority over the connection string
+                  below if both are set.
+                </p>
+              </div>
               <div>
                 <Label htmlFor="conn">Connection string {config?.has_connection_string && "(leave blank to keep current)"}</Label>
                 <Input
@@ -116,6 +143,10 @@ export function AzurePublishPage() {
                   onChange={(e) => setForm({ ...form, connection_string: e.target.value })}
                   placeholder="DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net"
                 />
+                <p className="mt-1 text-xs text-slate-500">
+                  Alternative to a SAS URL: grants full account-key access, and the app will create the container
+                  automatically and generate/rotate its own per-blob read SAS tokens.
+                </p>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>

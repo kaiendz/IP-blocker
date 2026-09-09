@@ -115,6 +115,7 @@ export interface AzurePublishConfigOut {
   generate_sas: boolean;
   enabled: boolean;
   has_connection_string: boolean;
+  has_sas_url: boolean;
 }
 
 export interface PublishedFeedPartOut {

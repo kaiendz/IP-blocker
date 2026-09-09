@@ -39,6 +39,7 @@ def _to_out(config: AzurePublishConfig) -> AzurePublishConfigOut:
         generate_sas=config.generate_sas,
         enabled=config.enabled,
         has_connection_string=bool(config.connection_string_encrypted),
+        has_sas_url=bool(config.sas_url_encrypted),
     )
 
 
@@ -57,10 +58,13 @@ def update_config(
     config = _get_or_create_config(db)
     data = payload.model_dump(exclude_unset=True)
     conn_str = data.pop("connection_string", None)
+    sas_url = data.pop("sas_url", None)
     for field, value in data.items():
         setattr(config, field, value)
     if conn_str:
         config.connection_string_encrypted = encrypt_secret(conn_str)
+    if sas_url:
+        config.sas_url_encrypted = encrypt_secret(sas_url)
     db.commit()
     db.refresh(config)
     log_action(db, "azure_publish.config_update", "azure_publish_config", config.id, {k: v for k, v in data.items()}, admin, get_client_ip(request))

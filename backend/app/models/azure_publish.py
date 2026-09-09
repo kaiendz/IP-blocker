@@ -14,6 +14,12 @@ class AzurePublishConfig(TimestampMixin, Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
     connection_string_encrypted: Mapped[str] = mapped_column(String(4096), default="")
+    # Alternative to connection_string: a full container-level SAS URL
+    # (https://<account>.blob.core.windows.net/<container>?sv=...&sig=...) with
+    # write+create+read permissions. Preferred when set, since it never
+    # requires storing the account key. Takes priority over the connection
+    # string if both are configured.
+    sas_url_encrypted: Mapped[str] = mapped_column(String(4096), default="")
     container_name: Mapped[str] = mapped_column(String(255), default="fortigate-blacklist")
     blob_prefix: Mapped[str] = mapped_column(String(255), default="blacklist/part-")
     chunk_size: Mapped[int] = mapped_column(Integer, default=2000, nullable=False)
