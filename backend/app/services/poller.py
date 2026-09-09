@@ -16,7 +16,12 @@ from app.services.forticloud_client import ForticloudClient
 
 logger = logging.getLogger(__name__)
 
-_VPN_TYPES = ["sslvpn", "ike", "admin"]
+# 'ike' and 'admin' are intentionally not polled: on real hardware the 'system'
+# subtype used for admin logins leaked unrelated IPsec entries (see
+# fortigate_client.py), and per-entry IPsec/SSL classification under the
+# shared 'vpn' subtype adds risk for a login type this app doesn't otherwise
+# need. Only SSL VPN user login failures are collected.
+_VPN_TYPES = ["sslvpn"]
 _LOOKBACK_ON_FIRST_POLL = timedelta(hours=6)
 
 

@@ -37,7 +37,7 @@ def run_seed() -> None:
                 DetectionRule(
                     name="Default brute-force rule",
                     scope="global",
-                    event_types=["sslvpn", "ike", "admin"],
+                    event_types=["sslvpn"],
                     threshold_count=settings.DEFAULT_THRESHOLD_COUNT,
                     window_minutes=settings.DEFAULT_WINDOW_MINUTES,
                     ttl_hours=settings.DEFAULT_TTL_HOURS,
