@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ShieldBan, X } from "lucide-react";
+import { ShieldBan, X, RotateCcw } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
-import type { AuthEventOut, Page } from "@/lib/types";
+import type { AuthEventOut, DeviceOut, Page } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
 import { useToast } from "@/components/ui/Toast";
 import { useConfirm } from "@/components/ui/ConfirmDialog";
@@ -13,9 +13,9 @@ import { Button } from "@/components/ui/Button";
 import { Checkbox } from "@/components/ui/Checkbox";
 import { SortHeader, toggleSort, type SortState } from "@/components/ui/SortHeader";
 import { PageSpinner, EmptyState, Mono } from "@/components/ui/Misc";
-import { formatDateTime } from "@/lib/utils";
+import { formatDateTime, useDebouncedValue } from "@/lib/utils";
 
-const PAGE_SIZE = 25;
+const PAGE_SIZES = [25, 50, 100, 250];
 
 type SortKey = "event_time" | "src_ip" | "username" | "vpn_type" | "action";
 
@@ -25,28 +25,59 @@ export function EventsPage() {
   const confirm = useConfirm();
   const qc = useQueryClient();
   const [srcIp, setSrcIp] = useState("");
+  const [username, setUsername] = useState("");
+  const [deviceId, setDeviceId] = useState("");
   const [vpnType, setVpnType] = useState("");
   const [action, setAction] = useState("");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(PAGE_SIZES[0]);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "event_time", dir: "desc" });
   const [selected, setSelected] = useState<Set<string>>(new Set());
 
+  const debouncedSrcIp = useDebouncedValue(srcIp);
+  const debouncedUsername = useDebouncedValue(username);
+
+  const { data: devices } = useQuery({
+    queryKey: ["devices"],
+    queryFn: () => api.get<DeviceOut[]>("/devices"),
+  });
+  const deviceNameById = new Map((devices ?? []).map((d) => [d.id, d.name]));
+
+  const hasActiveFilters = Boolean(debouncedSrcIp || debouncedUsername || deviceId || vpnType || action || from || to);
+
+  function resetFilters() {
+    setSrcIp("");
+    setUsername("");
+    setDeviceId("");
+    setVpnType("");
+    setAction("");
+    setFrom("");
+    setTo("");
+    setPage(1);
+  }
+
   const params = new URLSearchParams({
     page: String(page),
-    page_size: String(PAGE_SIZE),
+    page_size: String(pageSize),
     sort_by: sort.key,
     sort_dir: sort.dir,
   });
-  if (srcIp) params.set("src_ip", srcIp);
+  if (debouncedSrcIp) params.set("src_ip", debouncedSrcIp);
+  if (debouncedUsername) params.set("username", debouncedUsername);
+  if (deviceId) params.set("device_id", deviceId);
   if (vpnType) params.set("vpn_type", vpnType);
   if (action) params.set("action", action);
+  if (from) params.set("event_time_from", new Date(from).toISOString());
+  if (to) params.set("event_time_to", new Date(to).toISOString());
 
-  const { data, isLoading } = useQuery({
-    queryKey: ["events", srcIp, vpnType, action, page, sort.key, sort.dir],
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey: ["events", debouncedSrcIp, debouncedUsername, deviceId, vpnType, action, from, to, page, pageSize, sort.key, sort.dir],
     queryFn: () => api.get<Page<AuthEventOut>>(`/events?${params.toString()}`),
   });
 
-  const totalPages = data ? Math.max(1, Math.ceil(data.total / PAGE_SIZE)) : 1;
+  const totalPages = data ? Math.max(1, Math.ceil(data.total / pageSize)) : 1;
   const selectableIds = (data?.items ?? []).filter((e) => e.action !== "success").map((e) => e.id);
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
   const someSelected = selectableIds.some((id) => selected.has(id));
@@ -115,8 +146,38 @@ export function EventsPage() {
                 setSrcIp(e.target.value);
               }}
               placeholder="1.2.3.4"
-              className="w-40"
+              className="w-36"
             />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-400">User</label>
+            <Input
+              value={username}
+              onChange={(e) => {
+                setPage(1);
+                setUsername(e.target.value);
+              }}
+              placeholder="jdoe"
+              className="w-32"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-400">Device</label>
+            <Select
+              value={deviceId}
+              onChange={(e) => {
+                setPage(1);
+                setDeviceId(e.target.value);
+              }}
+              className="w-36"
+            >
+              <option value="">All</option>
+              {(devices ?? []).map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+            </Select>
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-400">VPN type</label>
@@ -126,7 +187,7 @@ export function EventsPage() {
                 setPage(1);
                 setVpnType(e.target.value);
               }}
-              className="w-36"
+              className="w-32"
             >
               <option value="">All</option>
               <option value="sslvpn">SSL VPN</option>
@@ -142,12 +203,58 @@ export function EventsPage() {
                 setPage(1);
                 setAction(e.target.value);
               }}
-              className="w-36"
+              className="w-32"
             >
               <option value="">All</option>
               <option value="failed">Failed</option>
               <option value="locked">Locked</option>
               <option value="success">Success</option>
+            </Select>
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-400">From</label>
+            <Input
+              type="datetime-local"
+              value={from}
+              onChange={(e) => {
+                setPage(1);
+                setFrom(e.target.value);
+              }}
+              className="w-44"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-400">To</label>
+            <Input
+              type="datetime-local"
+              value={to}
+              onChange={(e) => {
+                setPage(1);
+                setTo(e.target.value);
+              }}
+              className="w-44"
+            />
+          </div>
+          {hasActiveFilters && (
+            <Button size="sm" variant="ghost" onClick={resetFilters}>
+              <RotateCcw className="h-3.5 w-3.5" /> Clear filters
+            </Button>
+          )}
+          <div className="ml-auto">
+            <label className="mb-1 block text-xs font-medium text-slate-400">Per page</label>
+            <Select
+              value={String(pageSize)}
+              onChange={(e) => {
+                setPage(1);
+                setPageSize(Number(e.target.value));
+              }}
+              className="w-24"
+            >
+              {PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>
+                  {size}
+                </option>
+              ))}
             </Select>
           </div>
         </CardBody>
@@ -185,59 +292,72 @@ export function EventsPage() {
         {isLoading ? (
           <PageSpinner />
         ) : !data || data.items.length === 0 ? (
-          <EmptyState title="No events found" subtitle="Once devices are polling, failed logins will show up here." />
+          <EmptyState
+            title={hasActiveFilters ? "No events match these filters" : "No events found"}
+            subtitle={
+              hasActiveFilters
+                ? "Try widening the time range or clearing a filter."
+                : "Once devices are polling, failed logins will show up here."
+            }
+          />
         ) : (
           <>
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wide text-slate-400">
-                  {hasRole("analyst") && (
-                    <th className="w-10 px-4 py-2">
-                      <Checkbox
-                        aria-label="Select all failed/locked events on this page"
-                        checked={allSelected}
-                        indeterminate={someSelected && !allSelected}
-                        onChange={toggleAll}
-                        disabled={selectableIds.length === 0}
-                      />
-                    </th>
-                  )}
-                  <SortHeader label="Time" sortKey="event_time" sort={sort} onSort={onSort} />
-                  <SortHeader label="Source IP" sortKey="src_ip" sort={sort} onSort={onSort} />
-                  <SortHeader label="User" sortKey="username" sort={sort} onSort={onSort} />
-                  <SortHeader label="Type" sortKey="vpn_type" sort={sort} onSort={onSort} />
-                  <SortHeader label="Action" sortKey="action" sort={sort} onSort={onSort} />
-                  <th className="px-4 py-2">Detail</th>
-                </tr>
-              </thead>
-              <tbody>
-                {data.items.map((e) => (
-                  <tr key={e.id} className="border-b border-slate-800/60 last:border-0">
+            <div className={isFetching ? "opacity-60 transition-opacity" : "transition-opacity"}>
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-slate-800 text-left text-xs uppercase tracking-wide text-slate-400">
                     {hasRole("analyst") && (
-                      <td className="px-4 py-2">
-                        {e.action !== "success" && (
-                          <Checkbox
-                            aria-label={`Select event from ${e.src_ip}`}
-                            checked={selected.has(e.id)}
-                            onChange={() => toggleOne(e.id)}
-                          />
-                        )}
-                      </td>
+                      <th className="w-10 px-4 py-2">
+                        <Checkbox
+                          aria-label="Select all failed/locked events on this page"
+                          checked={allSelected}
+                          indeterminate={someSelected && !allSelected}
+                          onChange={toggleAll}
+                          disabled={selectableIds.length === 0}
+                        />
+                      </th>
                     )}
-                    <td className="px-4 py-2 text-slate-400">{formatDateTime(e.event_time)}</td>
-                    <td className="px-4 py-2">
-                      <Mono>{e.src_ip}</Mono>
-                    </td>
-                    <td className="px-4 py-2 text-slate-300">{e.username || "—"}</td>
-                    <td className="px-4 py-2 text-slate-400">{e.vpn_type}</td>
-                    <td className="px-4 py-2">
-                      <Badge tone={e.action === "failed" ? "danger" : e.action === "locked" ? "warning" : "success"}>{e.action}</Badge>
-                    </td>
-                    <td className="max-w-xs truncate px-4 py-2 text-slate-400">{e.reason_text}</td>
+                    <SortHeader label="Time" sortKey="event_time" sort={sort} onSort={onSort} />
+                    <SortHeader label="Source IP" sortKey="src_ip" sort={sort} onSort={onSort} />
+                    <SortHeader label="User" sortKey="username" sort={sort} onSort={onSort} />
+                    <th className="px-4 py-2">Device</th>
+                    <SortHeader label="Type" sortKey="vpn_type" sort={sort} onSort={onSort} />
+                    <SortHeader label="Action" sortKey="action" sort={sort} onSort={onSort} />
+                    <th className="px-4 py-2">Detail</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {data.items.map((e) => (
+                    <tr key={e.id} className="border-b border-slate-800/60 last:border-0 hover:bg-slate-800/30">
+                      {hasRole("analyst") && (
+                        <td className="px-4 py-2">
+                          {e.action !== "success" && (
+                            <Checkbox
+                              aria-label={`Select event from ${e.src_ip}`}
+                              checked={selected.has(e.id)}
+                              onChange={() => toggleOne(e.id)}
+                            />
+                          )}
+                        </td>
+                      )}
+                      <td className="whitespace-nowrap px-4 py-2 text-slate-400">{formatDateTime(e.event_time)}</td>
+                      <td className="px-4 py-2">
+                        <Mono>{e.src_ip}</Mono>
+                      </td>
+                      <td className="px-4 py-2 text-slate-300">{e.username || "—"}</td>
+                      <td className="px-4 py-2 text-slate-400">{deviceNameById.get(e.device_id) ?? "—"}</td>
+                      <td className="px-4 py-2 text-slate-400">{e.vpn_type}</td>
+                      <td className="px-4 py-2">
+                        <Badge tone={e.action === "failed" ? "danger" : e.action === "locked" ? "warning" : "success"}>{e.action}</Badge>
+                      </td>
+                      <td className="max-w-xs truncate px-4 py-2 text-slate-400" title={e.reason_text}>
+                        {e.reason_text}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
             <div className="flex items-center justify-between border-t border-slate-800 px-4 py-2.5 text-xs text-slate-400">
               <span>
                 {data.total} event(s) — page {page} of {totalPages}

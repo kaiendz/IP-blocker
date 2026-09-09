@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends
@@ -26,8 +27,11 @@ def list_events(
     db: Session = Depends(get_db),
     device_id: Optional[str] = None,
     src_ip: Optional[str] = None,
+    username: Optional[str] = None,
     vpn_type: Optional[str] = None,
     action: Optional[str] = None,
+    event_time_from: Optional[datetime] = None,
+    event_time_to: Optional[datetime] = None,
     page: int = 1,
     page_size: int = 50,
     sort_by: str = "event_time",
@@ -37,11 +41,17 @@ def list_events(
     if device_id:
         query = query.filter(AuthEvent.device_id == device_id)
     if src_ip:
-        query = query.filter(AuthEvent.src_ip == src_ip)
+        query = query.filter(AuthEvent.src_ip.ilike(f"%{src_ip}%"))
+    if username:
+        query = query.filter(AuthEvent.username.ilike(f"%{username}%"))
     if vpn_type:
         query = query.filter(AuthEvent.vpn_type == vpn_type)
     if action:
         query = query.filter(AuthEvent.action == action)
+    if event_time_from:
+        query = query.filter(AuthEvent.event_time >= event_time_from)
+    if event_time_to:
+        query = query.filter(AuthEvent.event_time <= event_time_to)
 
     column = _SORT_COLUMNS.get(sort_by, AuthEvent.event_time)
     order = asc(column) if sort_dir == "asc" else desc(column)
