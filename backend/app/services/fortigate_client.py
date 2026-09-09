@@ -231,9 +231,18 @@ def normalize_event(raw: dict[str, Any], vpn_type: str) -> Optional[NormalizedEv
     for 'system' subtype events (admin logins) `action` is generic ('login')
     and the result is instead in a separate `status` field ('success'/'failed'),
     so both must be checked independently rather than picking whichever is set.
+
+    Confirmed against real hardware: the 'system' subtype endpoint isn't
+    reliably scoped to admin logins on every device/firmware — it can return
+    the same IPsec/VPN entries as the 'vpn' subtype. So for vpn_type='admin',
+    only entries whose action is actually 'login' are accepted; anything else
+    (IPsec negotiation, SSL VPN messages, unrelated system events, ...) is
+    discarded here rather than trusting the subtype filter alone.
     """
     if vpn_type in ("sslvpn", "ike") and _guess_vpn_kind(raw) != vpn_type:
         return None  # this 'vpn' subtype entry belongs to the other vpn_type — leave it for that pass
+    if vpn_type == "admin" and _first(raw, "action").lower() != "login":
+        return None  # not an admin login attempt — the 'system' subtype leaked in unrelated content
 
     src_ip = _first(raw, "srcip", "src", "remip", "raddr")
     if not src_ip:
