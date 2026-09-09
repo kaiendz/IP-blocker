@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Plus, RefreshCw, Wifi, Cloud, Trash2 } from "lucide-react";
+import { Plus, RefreshCw, Wifi, Cloud, Trash2, Pencil } from "lucide-react";
 import { api, ApiError } from "@/lib/api";
 import type { DeviceOut, ForticloudCredentialOut, LogSource } from "@/lib/types";
 import { useAuth } from "@/lib/auth";
@@ -41,6 +41,7 @@ export function DevicesPage() {
   const qc = useQueryClient();
   const [addOpen, setAddOpen] = useState(false);
   const [credOpen, setCredOpen] = useState(false);
+  const [editingDevice, setEditingDevice] = useState<DeviceOut | null>(null);
   const [sort, setSort] = useState<SortState<SortKey>>({ key: "name", dir: "asc" });
 
   const { data: devices, isLoading } = useQuery({
@@ -153,6 +154,11 @@ export function DevicesPage() {
                         </Button>
                       )}
                       {hasRole("admin") && (
+                        <Button size="sm" variant="ghost" aria-label={`Edit device ${d.name}`} title="Edit" onClick={() => setEditingDevice(d)}>
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
+                      {hasRole("admin") && (
                         <Button
                           size="sm"
                           variant="ghost"
@@ -181,6 +187,9 @@ export function DevicesPage() {
       </Card>
 
       {addOpen && <AddDeviceModal onClose={() => setAddOpen(false)} credentials={creds ?? []} />}
+      {editingDevice && (
+        <EditDeviceModal device={editingDevice} onClose={() => setEditingDevice(null)} credentials={creds ?? []} />
+      )}
       {credOpen && <ForticloudCredentialsModal onClose={() => setCredOpen(false)} credentials={creds ?? []} />}
     </div>
   );
@@ -245,6 +254,10 @@ function AddDeviceModal({ onClose, credentials }: { onClose: () => void; credent
             <Input id="port" type="number" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
           </div>
         </div>
+        <div>
+          <Label htmlFor="vdom">VDOM</Label>
+          <Input id="vdom" value={form.vdom} onChange={(e) => setForm({ ...form, vdom: e.target.value })} />
+        </div>
         <fieldset>
           <legend className="mb-1 block text-xs font-medium text-slate-400">Log source</legend>
           <div className="grid grid-cols-2 gap-2">
@@ -305,6 +318,159 @@ function AddDeviceModal({ onClose, credentials }: { onClose: () => void; credent
           </Button>
           <Button type="submit" variant="primary" loading={mutation.isPending}>
             Add device
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function EditDeviceModal({
+  device,
+  onClose,
+  credentials,
+}: {
+  device: DeviceOut;
+  onClose: () => void;
+  credentials: ForticloudCredentialOut[];
+}) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [form, setForm] = useState({
+    name: device.name,
+    host: device.host,
+    port: device.port,
+    vdom: device.vdom,
+    api_token: "",
+    verify_tls: device.verify_tls,
+    site_tag: device.site_tag,
+    poll_enabled: device.poll_enabled,
+    log_source: device.log_source,
+    forticloud_credential_id: device.forticloud_credential_id ?? "",
+    forticloud_serial: device.forticloud_serial,
+  });
+
+  const mutation = useMutation({
+    mutationFn: () => {
+      const { api_token, ...rest } = form;
+      return api.patch(`/devices/${device.id}`, {
+        ...rest,
+        forticloud_credential_id: form.forticloud_credential_id || null,
+        // Omit api_token entirely when left blank, so the existing token is kept.
+        ...(api_token ? { api_token } : {}),
+      });
+    },
+    onSuccess: () => {
+      toast.push("Device updated");
+      qc.invalidateQueries({ queryKey: ["devices"] });
+      onClose();
+    },
+    onError: (e) => toast.push(e instanceof ApiError ? e.message : "Failed to update device", "error"),
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Edit ${device.name}`} width="max-w-lg">
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          mutation.mutate();
+        }}
+      >
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <Label htmlFor="edit-name">Name</Label>
+            <Input id="edit-name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+          </div>
+          <div>
+            <Label htmlFor="edit-site">Site tag</Label>
+            <Input id="edit-site" value={form.site_tag} onChange={(e) => setForm({ ...form, site_tag: e.target.value })} placeholder="hq, branch-1, ..." />
+          </div>
+        </div>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2">
+            <Label htmlFor="edit-host">Host / IP</Label>
+            <Input id="edit-host" required value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="fw01.example.com" />
+          </div>
+          <div>
+            <Label htmlFor="edit-port">Port</Label>
+            <Input id="edit-port" type="number" value={form.port} onChange={(e) => setForm({ ...form, port: Number(e.target.value) })} />
+          </div>
+        </div>
+        <div>
+          <Label htmlFor="edit-vdom">VDOM</Label>
+          <Input id="edit-vdom" value={form.vdom} onChange={(e) => setForm({ ...form, vdom: e.target.value })} />
+        </div>
+        <fieldset>
+          <legend className="mb-1 block text-xs font-medium text-slate-400">Log source</legend>
+          <div className="grid grid-cols-2 gap-2">
+            {LOG_SOURCE_OPTIONS.map((opt) => (
+              <button
+                key={opt.value}
+                type="button"
+                aria-pressed={form.log_source === opt.value}
+                onClick={() => setForm({ ...form, log_source: opt.value })}
+                className={cn(
+                  "rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-500",
+                  form.log_source === opt.value
+                    ? "border-brand-500 bg-brand-600/15"
+                    : "border-slate-700 hover:border-slate-600 hover:bg-slate-800/50"
+                )}
+              >
+                <div className={cn("text-sm font-semibold", form.log_source === opt.value ? "text-brand-300" : "text-slate-200")}>
+                  {opt.label}
+                </div>
+                <div className="mt-0.5 text-xs text-slate-400">{opt.hint}</div>
+              </button>
+            ))}
+          </div>
+        </fieldset>
+        {form.log_source === "device_api" ? (
+          <>
+            <div>
+              <Label htmlFor="edit-token">Read-only API token</Label>
+              <Input
+                id="edit-token"
+                type="password"
+                value={form.api_token}
+                onChange={(e) => setForm({ ...form, api_token: e.target.value })}
+                placeholder="Leave blank to keep the existing token"
+              />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-400">
+              <Checkbox checked={form.verify_tls} onChange={(e) => setForm({ ...form, verify_tls: e.target.checked })} />
+              Verify TLS certificate
+            </label>
+          </>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="edit-cred">FortiCloud credential</Label>
+              <Select id="edit-cred" value={form.forticloud_credential_id} onChange={(e) => setForm({ ...form, forticloud_credential_id: e.target.value })}>
+                <option value="">Select…</option>
+                {credentials.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
+            <div>
+              <Label htmlFor="edit-serial">Device serial</Label>
+              <Input id="edit-serial" value={form.forticloud_serial} onChange={(e) => setForm({ ...form, forticloud_serial: e.target.value })} placeholder="FGT..." />
+            </div>
+          </div>
+        )}
+        <label className="flex items-center gap-2 text-xs text-slate-400">
+          <Checkbox checked={form.poll_enabled} onChange={(e) => setForm({ ...form, poll_enabled: e.target.checked })} />
+          Polling enabled
+        </label>
+        <div className="flex justify-end gap-2 pt-2">
+          <Button type="button" variant="ghost" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button type="submit" variant="primary" loading={mutation.isPending}>
+            Save changes
           </Button>
         </div>
       </form>
