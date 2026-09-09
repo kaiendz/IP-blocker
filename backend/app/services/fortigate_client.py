@@ -52,6 +52,11 @@ class FortiGateClient:
         self.api_token = api_token
         self.verify_tls = verify_tls
         self.vdom = vdom
+        # Local log storage ("disk" vs "memory") is a per-device setting (Log &
+        # Report > Log Settings) — many FortiGate VMs/appliances only have one
+        # available. Cache whichever location responds successfully so we don't
+        # re-probe both on every poll.
+        self._log_location: Optional[str] = None
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -80,31 +85,46 @@ class FortiGateClient:
             return False, f"Error: {exc}"
 
     def fetch_events(
-        self, log_subtype: str, since: Optional[datetime], rows: int = 500, log_location: str = "disk"
+        self, log_subtype: str, since: Optional[datetime], rows: int = 500, log_location: Optional[str] = None
     ) -> list[dict[str, Any]]:
         """Fetch raw log entries for an event-log subtype (e.g. 'vpn', 'user', 'system').
 
         On FortiOS 7.2.x/7.4.x, `subtype` is a query parameter on the
         `/api/v2/monitor/log/{location}/event` endpoint, not a path segment.
-        `log_location` is 'disk' by default; FortiGate VMs without local disk
-        logging enabled may need 'memory' instead.
+        If `log_location` isn't given explicitly, tries 'disk' then falls back
+        to 'memory' on a 404 (some devices only support one or the other),
+        caching whichever works for subsequent calls on this client instance.
         """
         params: dict[str, Any] = {"vdom": self.vdom, "rows": rows, "subtype": log_subtype}
         if since is not None:
             # FortiOS accepts a unix-epoch "since" filter on most monitor/log endpoints.
             params["since"] = int(since.astimezone(timezone.utc).timestamp())
-        try:
-            with self._client() as client:
-                resp = client.get(f"/api/v2/monitor/log/{log_location}/event", params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-            return payload.get("results", []) or []
-        except httpx.HTTPStatusError as exc:
-            raise FortiGateAPIError(
-                f"FortiGate returned HTTP {exc.response.status_code} for log subtype '{log_subtype}'"
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise FortiGateAPIError(f"Failed to reach FortiGate: {exc}") from exc
+
+        locations = [log_location] if log_location else ([self._log_location] if self._log_location else ["disk", "memory"])
+        last_exc: Optional[httpx.HTTPStatusError] = None
+        for location in locations:
+            try:
+                with self._client() as client:
+                    resp = client.get(f"/api/v2/monitor/log/{location}/event", params=params)
+                resp.raise_for_status()
+                payload = resp.json()
+                self._log_location = location
+                return payload.get("results", []) or []
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                if exc.response.status_code == 404:
+                    continue  # this location isn't available on this device — try the next one
+                raise FortiGateAPIError(
+                    f"FortiGate returned HTTP {exc.response.status_code} for log subtype '{log_subtype}'"
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise FortiGateAPIError(f"Failed to reach FortiGate: {exc}") from exc
+
+        tried = "/".join(locations)
+        raise FortiGateAPIError(
+            f"FortiGate returned HTTP 404 for log subtype '{log_subtype}' at every log location tried "
+            f"({tried}) — check Log & Report > Log Settings on the device for which storage type it uses"
+        ) from last_exc
 
     def fetch_auth_failures(self, vpn_type: str, since: Optional[datetime], rows: int = 500) -> list[NormalizedEvent]:
         """vpn_type is one of 'sslvpn', 'ike', 'admin'."""
