@@ -1,17 +1,22 @@
 """Read-only FortiGate REST API client.
 
-Only ever issues GET requests against the FortiGate "monitor" log API to pull
+Only ever issues GET requests against the FortiGate Log Access API to pull
 VPN / admin login events. This client intentionally has no method that writes
 configuration to the device — the app has no firewall-write capability by design.
 
-IMPORTANT — validate against your firmware: FortiOS's monitor log API field
-names have shifted across 6.4 / 7.0 / 7.2 / 7.4. This client targets the
-FortiOS 7.2.x/7.4.x "event" log endpoint `/api/v2/monitor/log/disk/event`,
-where the log subtype (`vpn`, `system`, `user`, ...) is a query parameter —
-not a URL path segment — and normalizes several historically-seen field name
-variants. Use the "Test Connection" action after adding a device and, if
-event counts look wrong, inspect `raw` on a few `AuthEvent` rows and adjust
-`normalize_event` / the filters below for your exact version.
+Endpoint: `/api/v2/log/{store}/event/{subtype}` where `store` is 'memory',
+'disk', or 'forticloud' and `subtype` (e.g. 'vpn', 'system') is a URL path
+segment — this is the Log Access API, distinct from (and easily confused
+with) the Monitor API's `/api/v2/monitor/...` endpoints, which don't expose
+arbitrary historical log queries the same way. This endpoint also returns
+only a small page (~20 entries) per request unless paginated explicitly via
+`rows`/`start`, so `fetch_events` pages through until a short page signals
+the end or `max_pages` is hit as a safety cap.
+
+IMPORTANT — validate against your firmware: field names have shifted across
+6.4 / 7.0 / 7.2 / 7.4. Use the "Test Connection" action after adding a device
+and, if event counts look wrong, inspect `raw` on a few `AuthEvent` rows and
+adjust `normalize_event` / the filters below for your exact version.
 """
 from __future__ import annotations
 
@@ -52,11 +57,11 @@ class FortiGateClient:
         self.api_token = api_token
         self.verify_tls = verify_tls
         self.vdom = vdom
-        # Local log storage ("disk" vs "memory") is a per-device setting (Log &
+        # Local log storage ("memory" vs "disk") is a per-device setting (Log &
         # Report > Log Settings) — many FortiGate VMs/appliances only have one
-        # available. Cache whichever location responds successfully so we don't
-        # re-probe both on every poll.
-        self._log_location: Optional[str] = None
+        # available. "memory" exists on every device; "disk" only on models with
+        # local storage. Cache whichever responds so we don't re-probe every poll.
+        self._log_store: Optional[str] = None
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
@@ -85,46 +90,74 @@ class FortiGateClient:
             return False, f"Error: {exc}"
 
     def fetch_events(
-        self, log_subtype: str, since: Optional[datetime], rows: int = 500, log_location: Optional[str] = None
+        self,
+        log_subtype: str,
+        since: Optional[datetime],
+        rows: int = 500,
+        log_store: Optional[str] = None,
+        page_size: int = 1000,
+        max_pages: int = 50,
     ) -> list[dict[str, Any]]:
-        """Fetch raw log entries for an event-log subtype (e.g. 'vpn', 'user', 'system').
+        """Fetch raw log entries for a Log Access API event subtype (e.g. 'vpn', 'system').
 
-        On FortiOS 7.2.x/7.4.x, `subtype` is a query parameter on the
-        `/api/v2/monitor/log/{location}/event` endpoint, not a path segment.
-        If `log_location` isn't given explicitly, tries 'disk' then falls back
-        to 'memory' on a 404 (some devices only support one or the other),
+        `subtype` is a URL path segment: `/api/v2/log/{store}/event/{subtype}`.
+        If `log_store` isn't given explicitly, tries 'memory' then falls back
+        to 'disk' on a 404 (some devices only support one or the other),
         caching whichever works for subsequent calls on this client instance.
+        Pages through `rows`/`start` until a short page signals the end or
+        `max_pages` is hit as a safety cap, since this endpoint silently caps
+        each response to a small page unless paginated explicitly.
         """
-        params: dict[str, Any] = {"vdom": self.vdom, "rows": rows, "subtype": log_subtype}
+        filters = []
         if since is not None:
-            # FortiOS accepts a unix-epoch "since" filter on most monitor/log endpoints.
-            params["since"] = int(since.astimezone(timezone.utc).timestamp())
+            filters.append(f"timestamp=>{int(since.astimezone(timezone.utc).timestamp())}")
 
-        locations = [log_location] if log_location else ([self._log_location] if self._log_location else ["disk", "memory"])
+        stores = [log_store] if log_store else ([self._log_store] if self._log_store else ["memory", "disk"])
         last_exc: Optional[httpx.HTTPStatusError] = None
-        for location in locations:
+        for store in stores:
             try:
-                with self._client() as client:
-                    resp = client.get(f"/api/v2/monitor/log/{location}/event", params=params)
-                resp.raise_for_status()
-                payload = resp.json()
-                self._log_location = location
-                return payload.get("results", []) or []
+                results = self._fetch_all_pages(store, log_subtype, filters, rows, page_size, max_pages)
+                self._log_store = store
+                return results
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
                 if exc.response.status_code == 404:
-                    continue  # this location isn't available on this device — try the next one
+                    continue  # this store isn't available on this device — try the next one
                 raise FortiGateAPIError(
                     f"FortiGate returned HTTP {exc.response.status_code} for log subtype '{log_subtype}'"
                 ) from exc
             except httpx.HTTPError as exc:
                 raise FortiGateAPIError(f"Failed to reach FortiGate: {exc}") from exc
 
-        tried = "/".join(locations)
+        tried = "/".join(stores)
         raise FortiGateAPIError(
-            f"FortiGate returned HTTP 404 for log subtype '{log_subtype}' at every log location tried "
+            f"FortiGate returned HTTP 404 for log subtype '{log_subtype}' at every log store tried "
             f"({tried}) — check Log & Report > Log Settings on the device for which storage type it uses"
         ) from last_exc
+
+    def _fetch_all_pages(
+        self, store: str, log_subtype: str, filters: list[str], rows: int, page_size: int, max_pages: int
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        page_size = min(page_size, rows) if rows else page_size
+        with self._client() as client:
+            for page in range(max_pages):
+                params: dict[str, Any] = {"vdom": self.vdom, "rows": page_size, "start": page * page_size}
+                if filters:
+                    params["filter"] = filters
+                resp = client.get(f"/api/v2/log/{store}/event/{log_subtype}", params=params)
+                resp.raise_for_status()
+                page_results = resp.json().get("results", []) or []
+                results.extend(page_results)
+                if len(page_results) < page_size or (rows and len(results) >= rows):
+                    break
+            else:
+                logger.warning(
+                    "Hit the %d-page safety cap (%d entries) fetching '%s' logs from '%s' — "
+                    "results may be incomplete.",
+                    max_pages, len(results), log_subtype, store,
+                )
+        return results[:rows] if rows else results
 
     def fetch_auth_failures(self, vpn_type: str, since: Optional[datetime], rows: int = 500) -> list[NormalizedEvent]:
         """vpn_type is one of 'sslvpn', 'ike', 'admin'."""
