@@ -24,3 +24,7 @@ When adding (or editing) a FortiGate device, set **Log source** to `FortiCloud`,
 ## 4. Verify
 
 Use **Test Connection** on the device row — it confirms the OAuth token exchange succeeds. If event counts stay at zero after that, the log-query endpoint shape likely needs adjusting for your subscription; see the caveat at the top of this doc.
+
+## Alternative: if the device is directly reachable
+
+This OAuth-based FortiCloud IAM path exists for FortiGates the app **can't** reach directly over the network (e.g. no inbound route to the device's management IP). If the device *is* directly reachable, it's simpler and more reliably documented to instead set **Log source** to `Device API` and point the app at the FortiGate itself — its own Log Access API (`/api/v2/log/forticloud/event/<subtype>`) transparently proxies the query to FortiCloud when `store=forticloud`, without needing separate FortiCloud IAM credentials at all.

@@ -78,21 +78,54 @@ class ForticloudClient:
             return False, str(exc)
 
     def fetch_events(
-        self, serial: str, log_subtype: str, since: Optional[datetime], rows: int = 500
+        self,
+        serial: str,
+        log_subtype: str,
+        since: Optional[datetime],
+        rows: int = 500,
+        page_size: int = 1000,
+        max_pages: int = 50,
     ) -> list[dict[str, Any]]:
+        """Fetch log entries for a device/subtype, paginating via rows/start.
+
+        Mirrors the pagination convention FortiGateClient uses against the
+        device's own Log Access API (`start`/`rows`, stopping on a short page)
+        since Fortinet's log-search APIs commonly cap responses to a small
+        page unless paginated explicitly. Param names are unverified for your
+        specific subscription (see module docstring) — confirm via "Test
+        Connection" and adjust if pagination doesn't behave as expected.
+        """
         token = self._get_token()
-        params: dict[str, Any] = {"serial": serial, "subtype": log_subtype, "rows": rows}
-        if since is not None:
-            params["since"] = int(since.astimezone(timezone.utc).timestamp())
+        results: list[dict[str, Any]] = []
+        page_size = min(page_size, rows) if rows else page_size
         try:
             with httpx.Client(
                 base_url=self.log_query_base_url,
                 timeout=30.0,
                 headers={"Authorization": f"Bearer {token}"},
             ) as client:
-                resp = client.get("/api/v1/logs/search", params=params)
-            resp.raise_for_status()
-            payload = resp.json()
-            return payload.get("results", payload.get("data", [])) or []
+                for page in range(max_pages):
+                    params: dict[str, Any] = {
+                        "serial": serial,
+                        "subtype": log_subtype,
+                        "rows": page_size,
+                        "start": page * page_size,
+                    }
+                    if since is not None:
+                        params["since"] = int(since.astimezone(timezone.utc).timestamp())
+                    resp = client.get("/api/v1/logs/search", params=params)
+                    resp.raise_for_status()
+                    payload = resp.json()
+                    page_results = payload.get("results", payload.get("data", [])) or []
+                    results.extend(page_results)
+                    if len(page_results) < page_size or (rows and len(results) >= rows):
+                        break
+                else:
+                    logger.warning(
+                        "Hit the %d-page safety cap (%d entries) fetching '%s' logs for device %s — "
+                        "results may be incomplete.",
+                        max_pages, len(results), log_subtype, serial,
+                    )
         except httpx.HTTPError as exc:
             raise ForticloudAPIError(f"FortiCloud log query failed: {exc}") from exc
+        return results[:rows] if rows else results
