@@ -35,6 +35,8 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+    environment:
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
     ports:
       - "8080:8080"
 

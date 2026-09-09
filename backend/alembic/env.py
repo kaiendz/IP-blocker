@@ -11,7 +11,11 @@ from app.core.config import settings  # noqa: E402
 from app.models import Base  # noqa: E402
 
 config = context.config
-config.set_main_option("sqlalchemy.url", os.environ.get("DATABASE_URL", settings.DATABASE_URL))
+# ConfigParser interpolation treats "%" specially, so escape it before storing
+# (a raw "%" in the URL, e.g. from a percent-encoded password, would otherwise
+# raise "invalid interpolation syntax").
+database_url = os.environ.get("DATABASE_URL", settings.DATABASE_URL)
+config.set_main_option("sqlalchemy.url", database_url.replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
