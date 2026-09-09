@@ -161,7 +161,15 @@ class FortiGateClient:
         return results[:rows] if rows else results
 
     def fetch_auth_failures(self, vpn_type: str, since: Optional[datetime], rows: int = 500) -> list[NormalizedEvent]:
-        """vpn_type is one of 'sslvpn', 'ike', 'admin'."""
+        """vpn_type is one of 'sslvpn', 'ike', 'admin'.
+
+        'sslvpn' and 'ike' both come from the same 'vpn' log subtype — FortiOS
+        doesn't split them into separate subtypes/endpoints — so each raw entry
+        is classified individually (see `_guess_vpn_kind`) and only kept if it
+        actually matches the requested `vpn_type`. Without this, both calls
+        would fetch the exact same entries and every one would get stored
+        twice, tagged with whichever type happened to be requested.
+        """
         subtype = VPN_TYPE_TO_SUBTYPE.get(vpn_type)
         if subtype is None:
             raise ValueError(f"Unknown vpn_type: {vpn_type}")
@@ -196,6 +204,24 @@ def _first(raw: dict[str, Any], *keys: str, default: str = "") -> str:
     return default
 
 
+def _guess_vpn_kind(raw: dict[str, Any]) -> str:
+    """Classify a raw 'vpn'-subtype entry as 'sslvpn' or 'ike' — FortiOS logs
+    both under the same subtype/endpoint with no separate path to tell them
+    apart up front. Prefers an explicit `tunneltype` field when present;
+    otherwise SSL VPN action values are conventionally prefixed 'ssl-'
+    (ssl-login-fail, ssl-tunnel-up, ...) while IPsec/IKE actions aren't
+    (phase1-up, negotiate-error, tunnel-down, ...) — this only decides which
+    bucket an entry belongs to and doesn't change how failures are detected
+    within either bucket.
+    """
+    tunnel_type = _first(raw, "tunneltype").lower()
+    if tunnel_type in ("ssl", "sslvpn"):
+        return "sslvpn"
+    if tunnel_type in ("ipsec", "ike"):
+        return "ike"
+    return "sslvpn" if _first(raw, "action").lower().startswith("ssl") else "ike"
+
+
 def normalize_event(raw: dict[str, Any], vpn_type: str) -> Optional[NormalizedEvent]:
     """Best-effort normalization across FortiOS field-naming variants.
 
@@ -206,6 +232,9 @@ def normalize_event(raw: dict[str, Any], vpn_type: str) -> Optional[NormalizedEv
     and the result is instead in a separate `status` field ('success'/'failed'),
     so both must be checked independently rather than picking whichever is set.
     """
+    if vpn_type in ("sslvpn", "ike") and _guess_vpn_kind(raw) != vpn_type:
+        return None  # this 'vpn' subtype entry belongs to the other vpn_type — leave it for that pass
+
     src_ip = _first(raw, "srcip", "src", "remip", "raddr")
     if not src_ip:
         return None
